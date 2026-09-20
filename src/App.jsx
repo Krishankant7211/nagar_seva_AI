@@ -1,267 +1,279 @@
 import React, { useState, useEffect } from 'react';
-import Navbar from './components/Navbar';
-import CitizenPortal from './components/CitizenPortal';
-import WhatsAppSimulator from './components/WhatsAppSimulator';
-import AuthorityDashboard from './components/AuthorityDashboard';
-import PredictiveAiView from './components/PredictiveAiView';
-import AnalyticsView from './components/AnalyticsView';
-import ExplainableAiModal from './components/ExplainableAiModal';
+import { Header } from './components/layout/Header';
+import { Footer } from './components/layout/Footer';
+import { AdminSidebar } from './components/layout/AdminSidebar';
 
-import { 
-  getStoredIssues, 
-  saveStoredIssues, 
-  getOfflineQueue, 
-  addToOfflineQueue, 
-  clearOfflineQueue 
-} from './services/storageService';
+import { HomePage } from './components/citizen/HomePage';
+import { ReportIssuePage } from './components/citizen/ReportIssuePage';
+import { CommunityFeedPage } from './components/citizen/CommunityFeedPage';
+import { ComplaintDetailPage } from './components/citizen/ComplaintDetailPage';
+import { MyReportsPage } from './components/citizen/MyReportsPage';
+import { ProfilePage } from './components/citizen/ProfilePage';
+import { AuthModal } from './components/AuthModal';
+import { DuplicateWarningModal } from './components/DuplicateWarningModal';
 
-import { 
-  computePriorityScore, 
-  findDuplicateIssue 
-} from './services/aiEngine';
+import { AdminDashboardView } from './components/admin/AdminDashboard';
+import { AdminComplaintsTable } from './components/admin/AdminComplaintsTable';
+import { AdminAnalyticsPage } from './components/admin/AdminAnalyticsPage';
+import { AdminLoginModal } from './components/AdminLoginModal';
 
-import { PREDICTIVE_HOTSPOTS } from './data/mockData';
+import { apiService } from './services/api';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState('citizen'); // 'citizen' | 'whatsapp' | 'authority' | 'predictive' | 'analytics'
-  const [issues, setIssues] = useState([]);
-  const [predictiveHotspots, setPredictiveHotspots] = useState(PREDICTIVE_HOTSPOTS);
-  const [isOffline, setIsOffline] = useState(false);
-  const [offlineQueue, setOfflineQueue] = useState([]);
-  const [explainModalIssue, setExplainModalIssue] = useState(null);
+  // Navigation & User session states
+  const [activeTab, setActiveTab] = useState('home'); // home | report | community | my-reports | profile
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [activeAdminTab, setActiveAdminTab] = useState('dashboard'); // dashboard | complaints | analytics
 
-  // Initialize data on mount
+  const [user, setUser] = useState(null);
+  const [complaints, setComplaints] = useState([]);
+  const [analytics, setAnalytics] = useState({
+    total_complaints: 0,
+    pending: 0,
+    in_progress: 0,
+    resolved: 0,
+    rejected: 0
+  });
+  const [loading, setLoading] = useState(true);
+
+  // Modals & detail view states
+  const [isAuthOpen, setIsAuthOpen] = useState(false);
+  const [isAdminLoginOpen, setIsAdminLoginOpen] = useState(false);
+  const [selectedComplaint, setSelectedComplaint] = useState(null);
+  const [duplicateModal, setDuplicateModal] = useState({
+    isOpen: false,
+    matchedComplaint: null,
+    pendingPayload: null
+  });
+
   useEffect(() => {
-    const loadedIssues = getStoredIssues();
-    setIssues(loadedIssues);
-    setOfflineQueue(getOfflineQueue());
+    // 1. Restore persistent user session
+    const savedUser = apiService.getCurrentUser();
+    if (savedUser) {
+      setUser(savedUser);
+    }
+    loadData();
   }, []);
 
-  // Save changes to localStorage whenever issues change
-  const updateIssuesState = (newIssues) => {
-    setIssues(newIssues);
-    saveStoredIssues(newIssues);
-  };
-
-  // Submit Report Handler (with AI Duplicate Aggregation & Priority Scoring)
-  const handleSubmitReport = (newReport) => {
-    // 1. Offline Mode Queueing
-    if (isOffline) {
-      const queueCount = addToOfflineQueue(newReport);
-      setOfflineQueue(getOfflineQueue());
-      return {
-        isDuplicate: false,
-        message: `Offline mode active! Report queued locally. (${queueCount} items in offline queue)`
-      };
+  const loadData = async () => {
+    setLoading(true);
+    try {
+      const data = await apiService.getComplaints();
+      setComplaints(data);
+      const stats = await apiService.getAdminAnalytics();
+      setAnalytics(stats);
+    } catch (e) {
+      console.error('Data load error:', e);
+    } finally {
+      setLoading(false);
     }
+  };
 
-    // 2. AI Duplicate Report Detection
-    const duplicateCheck = findDuplicateIssue(
-      newReport.location.lat,
-      newReport.location.lng,
-      newReport.category,
-      issues
-    );
-
-    if (duplicateCheck.isDuplicate) {
-      // Merge into existing Master Issue
-      const matched = duplicateCheck.matchedIssue;
-      const updatedIssues = issues.map(iss => {
-        if (iss.id === matched.id) {
-          const newCount = (iss.reportCount || 1) + 1;
-          const updated = {
-            ...iss,
-            reportCount: newCount,
-            updatedAt: new Date().toISOString()
-          };
-          const { priorityScore } = computePriorityScore(updated);
-          updated.priorityScore = priorityScore;
-          updated.timeline.push({
-            step: 'Duplicate Report Merged',
-            time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-            note: `Verified citizen report #${newCount} merged at ${duplicateCheck.distanceMeters}m distance`
-          });
-          return updated;
-        }
-        return iss;
-      });
-
-      updateIssuesState(updatedIssues);
-      return {
-        isDuplicate: true,
-        message: `AI detected a duplicate pothole/issue within ${duplicateCheck.distanceMeters}m! Your report has been merged into Master Issue ${matched.id}. Total citizen reports merged: ${matched.reportCount + 1}.`
-      };
+  const handleSupport = async (complaintId) => {
+    if (!user) {
+      setIsAuthOpen(true);
+      throw new Error('Please login to support');
     }
-
-    // 3. Register New Master Issue
-    const compId = `MYC-${Math.floor(1000 + Math.random() * 9000)}`;
-    const issueToScore = {
-      id: compId,
-      ...newReport,
-      reportCount: 1,
-      status: 'Reported',
-      assignedTo: 'Unassigned',
-      assignedTeam: 'Pending Dispatch',
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      timeline: [
-        {
-          step: 'Reported',
-          time: 'Just now',
-          note: `Registered via ${activeTab === 'whatsapp' ? 'WhatsApp AI Bot' : 'MyCity Web App'}`
-        },
-        {
-          step: 'AI Analysis',
-          time: 'Just now',
-          note: `AI Multimodal Vision confirmed ${newReport.categoryName}. Priority calculated.`
-        }
-      ]
-    };
-
-    const { priorityScore } = computePriorityScore(issueToScore);
-    issueToScore.priorityScore = priorityScore;
-
-    const nextIssues = [issueToScore, ...issues];
-    updateIssuesState(nextIssues);
-
-    return {
-      isDuplicate: false,
-      message: `Report successfully registered! Generated Complaint ID: ${compId}. AI Priority Score: ${priorityScore}/100.`
-    };
+    if (!user.is_verified) {
+      setIsAuthOpen(true);
+      throw new Error('Aadhaar verification required');
+    }
+    const res = await apiService.supportComplaint(complaintId, user.id);
+    await loadData();
+    return res;
   };
 
-  // Sync Offline Queue Handler
-  const handleSyncOffline = () => {
-    const queue = getOfflineQueue();
-    if (queue.length === 0) return;
+  const handleAdminToggle = (targetState) => {
+    if (targetState && !isAdmin) {
+      setIsAdminLoginOpen(true);
+    } else {
+      setIsAdmin(false);
+    }
+  };
 
-    queue.forEach(item => {
-      handleSubmitReport(item);
+  const handleLogout = () => {
+    apiService.logoutUser();
+    setUser(null);
+    setActiveTab('home');
+  };
+
+  const handleShowDuplicateWarning = (matchedComplaint, pendingPayload) => {
+    setDuplicateModal({
+      isOpen: true,
+      matchedComplaint,
+      pendingPayload
     });
-
-    clearOfflineQueue();
-    setOfflineQueue([]);
-    setIsOffline(false);
   };
 
-  // Authority Status Update Handler
-  const handleUpdateStatus = (issueId, newStatus) => {
-    const updated = issues.map(iss => {
-      if (iss.id === issueId) {
-        const item = { ...iss, status: newStatus, updatedAt: new Date().toISOString() };
-        item.timeline.push({
-          step: newStatus,
-          time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-          note: `Status updated by Municipal Authority to ${newStatus}`
-        });
-        return item;
-      }
-      return iss;
-    });
-    updateIssuesState(updated);
+  const handleSupportExistingFromDuplicate = async (matchedId) => {
+    if (user && user.is_verified) {
+      await apiService.supportComplaint(matchedId, user.id);
+      await loadData();
+    } else {
+      setIsAuthOpen(true);
+    }
   };
 
-  // Citizen Resolution Verification Feedback Handler
-  const handleCitizenVerify = (issueId, feedbackType) => {
-    const updated = issues.map(iss => {
-      if (iss.id === issueId) {
-        const item = { ...iss, citizenFeedback: feedbackType };
-        if (feedbackType === 'reopened') {
-          item.status = 'In Progress';
-          item.priorityScore = Math.min(100, item.priorityScore + 15);
-          item.timeline.push({
-            step: 'Issue Reopened',
-            time: 'Just now',
-            note: 'Citizen reported issue still exists on ground. Priority score elevated by +15.'
-          });
-        } else {
-          item.timeline.push({
-            step: 'Citizen Verified',
-            time: 'Just now',
-            note: 'Citizen confirmed resolution 👍'
-          });
-        }
-        return item;
-      }
-      return iss;
-    });
-    updateIssuesState(updated);
+  const handleSubmitAnywayFromDuplicate = async (pendingPayload) => {
+    await apiService.createComplaint(pendingPayload);
+    await loadData();
   };
 
-  const totalActiveIssues = issues.filter(i => i.status !== 'Resolved').length;
+  const handleUpdateStatus = async (id, newStatus) => {
+    await apiService.updateStatus(id, newStatus);
+    await loadData();
+  };
 
   return (
-    <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column' }}>
+    <div className="min-h-screen bg-slate-50 flex flex-col font-sans text-slate-900">
       
-      {/* Top Navbar */}
-      <Navbar
+      {/* Header Bar */}
+      <Header
         activeTab={activeTab}
-        setActiveTab={setActiveTab}
-        isOffline={isOffline}
-        setIsOffline={setIsOffline}
-        offlineQueueCount={offlineQueue.length}
-        onSyncOffline={handleSyncOffline}
-        totalActiveIssues={totalActiveIssues}
+        onNavigate={(tab) => {
+          setActiveTab(tab);
+          window.scrollTo({ top: 0, behavior: 'smooth' });
+        }}
+        user={user}
+        isAdmin={isAdmin}
+        onOpenAuth={() => setIsAuthOpen(true)}
+        onToggleAdmin={handleAdminToggle}
+        onLogout={handleLogout}
       />
 
-      {/* Main Content Area */}
-      <main style={{ flex: 1, paddingBottom: '40px' }}>
-        {activeTab === 'citizen' && (
-          <CitizenPortal
-            issues={issues}
-            onSubmitReport={handleSubmitReport}
-            onCitizenVerify={handleCitizenVerify}
-            isOffline={isOffline}
-            onOpenExplainModal={setExplainModalIssue}
-          />
-        )}
+      {/* Main View Area */}
+      <div className="flex-1 flex">
+        
+        {/* Admin Interface Layout with Sidebar */}
+        {isAdmin ? (
+          <div className="flex-1 flex flex-col md:flex-row max-w-7xl w-full mx-auto">
+            <AdminSidebar
+              activeAdminTab={activeAdminTab}
+              onAdminTabChange={setActiveAdminTab}
+              onExitAdmin={() => setIsAdmin(false)}
+            />
+            
+            <main className="flex-1 p-6 md:p-8 bg-slate-50 min-w-0">
+              {activeAdminTab === 'dashboard' && (
+                <AdminDashboardView
+                  analytics={analytics}
+                  complaints={complaints}
+                  onSelectComplaint={(c) => setSelectedComplaint(c)}
+                  onNavigateToTab={setActiveAdminTab}
+                />
+              )}
 
-        {activeTab === 'whatsapp' && (
-          <WhatsAppSimulator
-            onSubmitReport={handleSubmitReport}
-          />
-        )}
+              {activeAdminTab === 'complaints' && (
+                <AdminComplaintsTable
+                  complaints={complaints}
+                  onUpdateStatus={handleUpdateStatus}
+                  onSelectComplaint={(c) => setSelectedComplaint(c)}
+                />
+              )}
 
-        {activeTab === 'authority' && (
-          <AuthorityDashboard
-            issues={issues}
-            predictiveHotspots={predictiveHotspots}
-            onUpdateStatus={handleUpdateStatus}
-            onOpenExplainModal={setExplainModalIssue}
-          />
-        )}
+              {activeAdminTab === 'analytics' && (
+                <AdminAnalyticsPage
+                  analytics={analytics}
+                  complaints={complaints}
+                />
+              )}
+            </main>
+          </div>
+        ) : (
+          /* Citizen View Layout */
+          <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8">
+            {activeTab === 'home' && (
+              <HomePage
+                complaints={complaints}
+                analytics={analytics}
+                onNavigate={setActiveTab}
+                currentUser={user}
+                onSupport={handleSupport}
+                onOpenAuth={() => setIsAuthOpen(true)}
+                onSelectComplaint={(c) => setSelectedComplaint(c)}
+              />
+            )}
 
-        {activeTab === 'predictive' && (
-          <PredictiveAiView
-            predictiveHotspots={predictiveHotspots}
-          />
-        )}
+            {activeTab === 'report' && (
+              <ReportIssuePage
+                currentUser={user}
+                onOpenAuth={() => setIsAuthOpen(true)}
+                onShowDuplicateWarning={handleShowDuplicateWarning}
+                onSubmitSuccess={() => loadData()}
+                onNavigate={setActiveTab}
+              />
+            )}
 
-        {activeTab === 'analytics' && (
-          <AnalyticsView
-            issues={issues}
-          />
-        )}
-      </main>
+            {activeTab === 'community' && (
+              <CommunityFeedPage
+                complaints={complaints}
+                currentUser={user}
+                onSupport={handleSupport}
+                onOpenAuth={() => setIsAuthOpen(true)}
+                onNavigate={setActiveTab}
+                onSelectComplaint={(c) => setSelectedComplaint(c)}
+                loading={loading}
+              />
+            )}
 
-      {/* Explainable AI Modal */}
-      {explainModalIssue && (
-        <ExplainableAiModal
-          issue={explainModalIssue}
-          onClose={() => setExplainModalIssue(null)}
+            {activeTab === 'my-reports' && (
+              <MyReportsPage
+                complaints={complaints}
+                currentUser={user}
+                onNavigate={setActiveTab}
+                onSelectComplaint={(c) => setSelectedComplaint(c)}
+              />
+            )}
+
+            {activeTab === 'profile' && (
+              <ProfilePage
+                currentUser={user}
+                onOpenAuth={() => setIsAuthOpen(true)}
+                onLogout={handleLogout}
+              />
+            )}
+          </main>
+        )}
+      </div>
+
+      {/* Official Government Footer */}
+      <Footer />
+
+      {/* Modals & Dialogs */}
+      <AuthModal
+        isOpen={isAuthOpen}
+        onClose={() => setIsAuthOpen(false)}
+        existingUser={user}
+        onAuthSuccess={(u) => setUser(u)}
+      />
+
+      <AdminLoginModal
+        isOpen={isAdminLoginOpen}
+        onClose={() => setIsAdminLoginOpen(false)}
+        onAdminLoginSuccess={() => setIsAdmin(true)}
+      />
+
+      {selectedComplaint && (
+        <ComplaintDetailPage
+          complaint={selectedComplaint}
+          onClose={() => setSelectedComplaint(null)}
+          allComplaints={complaints}
+          currentUser={user}
+          onSupport={handleSupport}
+          onOpenAuth={() => setIsAuthOpen(true)}
+          onSelectComplaint={(c) => setSelectedComplaint(c)}
         />
       )}
 
-      {/* Footer */}
-      <footer style={{
-        textAlign: 'center',
-        padding: '20px',
-        borderTop: '1px solid rgba(255, 255, 255, 0.08)',
-        color: '#64748b',
-        fontSize: '0.8rem'
-      }}>
-        MyCity AI / Nagar Seva AI Platform • Powered by Multimodal Computer Vision & Explainable AI Engine
-      </footer>
+      <DuplicateWarningModal
+        isOpen={duplicateModal.isOpen}
+        onClose={() => setDuplicateModal({ isOpen: false, matchedComplaint: null, pendingPayload: null })}
+        matchedComplaint={duplicateModal.matchedComplaint}
+        pendingPayload={duplicateModal.pendingPayload}
+        onSupportExisting={handleSupportExistingFromDuplicate}
+        onSubmitAnyway={handleSubmitAnywayFromDuplicate}
+        currentUser={user}
+      />
     </div>
   );
 }
