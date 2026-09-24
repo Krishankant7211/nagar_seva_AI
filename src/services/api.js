@@ -344,5 +344,168 @@ export const apiService = {
   },
   logoutUser() {
     localStorage.removeItem(USER_KEY);
+  },
+
+  // New Supabase Auth API Methods
+  async registerUser({ user_id, email, phone_number, full_name }) {
+    try {
+      const res = await fetch(`${BASE_URL}/auth/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_id, email, phone_number, full_name })
+      });
+      if (res.ok) return await res.json();
+    } catch (e) {
+      // Fallback
+    }
+    // Local fallback
+    const mockUser = {
+      id: user_id || `USER-${Math.floor(1000 + Math.random() * 9000)}`,
+      email: email || null,
+      phone_number: phone_number || null,
+      full_name,
+      is_phone_verified: false,
+      is_email_verified: false,
+      is_aadhaar_verified: false,
+      role: 'citizen',
+      created_at: new Date().toISOString()
+    };
+    saveLocalUser(mockUser);
+    return mockUser;
+  },
+
+  async getMe(userId) {
+    if (!userId || userId === 'local') {
+      return getLocalUser();
+    }
+    try {
+      const res = await fetch(`${BASE_URL}/auth/me`, {
+        headers: { 'X-User-ID': userId }
+      });
+      if (res.ok) return await res.json();
+    } catch (e) {
+      // Fallback
+    }
+    return getLocalUser();
+  },
+
+  loginFallback(emailOrPhone) {
+    // For local dev: return stored user if identity matches
+    const stored = getLocalUser();
+    if (stored && (stored.email === emailOrPhone || stored.phone_number === emailOrPhone)) {
+      return stored;
+    }
+    // Create minimal local profile
+    const isEmail = emailOrPhone.includes('@');
+    const newUser = {
+      id: `USER-${Math.floor(1000 + Math.random() * 9000)}`,
+      email: isEmail ? emailOrPhone : null,
+      phone_number: isEmail ? null : emailOrPhone,
+      full_name: 'Citizen',
+      is_aadhaar_verified: false,
+      role: 'citizen',
+      created_at: new Date().toISOString()
+    };
+    saveLocalUser(newUser);
+    return newUser;
+  },
+
+  async initiateIdentityVerification(userId, fullName, aadhaarNumber) {
+    try {
+      const res = await fetch(`${BASE_URL}/auth/verify-identity/initiate`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-User-ID': userId
+        },
+        body: JSON.stringify({ full_name: fullName, aadhaar_number: aadhaarNumber })
+      });
+      if (res.ok) return await res.json();
+    } catch (e) {
+      // Fallback
+    }
+    // Local fallback: mock reference ID
+    return {
+      success: true,
+      reference_id: `REF-DL-${Math.random().toString(36).substr(2, 8).toUpperCase()}`,
+      message: 'OTP dispatched to Aadhaar-linked mobile (mock).',
+      mock_otp: '123456'
+    };
+  },
+
+  async confirmIdentityVerification(userId, referenceId, otp, fullName, aadhaarNumber) {
+    try {
+      const res = await fetch(`${BASE_URL}/auth/verify-identity/confirm`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-User-ID': userId
+        },
+        body: JSON.stringify({
+          reference_id: referenceId,
+          otp,
+          full_name: fullName,
+          aadhaar_number: aadhaarNumber
+        })
+      });
+      if (res.ok) {
+        const user = await res.json();
+        saveLocalUser(user);
+        return user;
+      }
+      const err = await res.json();
+      throw new Error(err.detail || 'Verification failed.');
+    } catch (e) {
+      if (e.message && !e.message.includes('fetch')) throw e;
+    }
+    // Local fallback
+    if (otp !== '123456') throw new Error('Invalid OTP. Use 123456 for mock verification.');
+    const clean = aadhaarNumber.replace(/\s/g, '');
+    if (clean.length !== 12 || !/^\d+$/.test(clean)) {
+      throw new Error('Aadhaar number must be exactly 12 numeric digits.');
+    }
+    const currentUser = getLocalUser() || { id: userId };
+    const updatedUser = {
+      ...currentUser,
+      full_name: fullName,
+      aadhaar_last4: clean.slice(-4),
+      is_aadhaar_verified: true,
+      verification_reference: referenceId,
+      verification_timestamp: new Date().toISOString()
+    };
+    saveLocalUser(updatedUser);
+    return updatedUser;
+  },
+
+  async linkWhatsApp(userId, whatsappNumber) {
+    try {
+      const res = await fetch(`${BASE_URL}/auth/link-whatsapp`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-User-ID': userId
+        },
+        body: JSON.stringify({ whatsapp_number: whatsappNumber })
+      });
+      if (res.ok) {
+        const user = await res.json();
+        saveLocalUser(user);
+        return user;
+      }
+      const err = await res.json();
+      throw new Error(err.detail || 'WhatsApp linking failed.');
+    } catch (e) {
+      if (e.message && !e.message.includes('fetch')) throw e;
+    }
+    // Local fallback
+    const currentUser = getLocalUser() || { id: userId };
+    const updated = {
+      ...currentUser,
+      whatsapp_number: whatsappNumber,
+      whatsapp_linked_at: new Date().toISOString()
+    };
+    saveLocalUser(updated);
+    return updated;
   }
 };
+

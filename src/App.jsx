@@ -9,7 +9,6 @@ import { CommunityFeedPage } from './components/citizen/CommunityFeedPage';
 import { ComplaintDetailPage } from './components/citizen/ComplaintDetailPage';
 import { MyReportsPage } from './components/citizen/MyReportsPage';
 import { ProfilePage } from './components/citizen/ProfilePage';
-import { AuthModal } from './components/AuthModal';
 import { DuplicateWarningModal } from './components/DuplicateWarningModal';
 
 import { AdminDashboardView } from './components/admin/AdminDashboard';
@@ -17,15 +16,34 @@ import { AdminComplaintsTable } from './components/admin/AdminComplaintsTable';
 import { AdminAnalyticsPage } from './components/admin/AdminAnalyticsPage';
 import { AdminLoginModal } from './components/AdminLoginModal';
 
+// New Supabase Auth & Identity pages
+import { RegisterPage } from './components/auth/RegisterPage';
+import { LoginPage } from './components/auth/LoginPage';
+import { IdentityVerificationPage } from './components/auth/IdentityVerificationPage';
+import { WhatsAppLinkModal } from './components/auth/WhatsAppLinkModal';
+
 import { apiService } from './services/api';
+import { authService } from './services/authService';
+
+/**
+ * Determines which onboarding screen the citizen should see.
+ * Returns: 'register' | 'login' | 'verify' | 'whatsapp' | null (= platform access)
+ */
+function getAuthScreen(user) {
+  if (!user) return 'login';
+  if (!user.is_aadhaar_verified) return 'verify';
+  return null;
+}
 
 export default function App() {
   // Navigation & User session states
-  const [activeTab, setActiveTab] = useState('home'); // home | report | community | my-reports | profile
+  const [activeTab, setActiveTab] = useState('home');
   const [isAdmin, setIsAdmin] = useState(false);
-  const [activeAdminTab, setActiveAdminTab] = useState('dashboard'); // dashboard | complaints | analytics
+  const [activeAdminTab, setActiveAdminTab] = useState('dashboard');
 
   const [user, setUser] = useState(null);
+  const [authScreen, setAuthScreen] = useState(null); // null = logged in + verified
+  const [showWhatsAppModal, setShowWhatsAppModal] = useState(false);
   const [complaints, setComplaints] = useState([]);
   const [analytics, setAnalytics] = useState({
     total_complaints: 0,
@@ -36,8 +54,6 @@ export default function App() {
   });
   const [loading, setLoading] = useState(true);
 
-  // Modals & detail view states
-  const [isAuthOpen, setIsAuthOpen] = useState(false);
   const [isAdminLoginOpen, setIsAdminLoginOpen] = useState(false);
   const [selectedComplaint, setSelectedComplaint] = useState(null);
   const [duplicateModal, setDuplicateModal] = useState({
@@ -47,10 +63,13 @@ export default function App() {
   });
 
   useEffect(() => {
-    // 1. Restore persistent user session
     const savedUser = apiService.getCurrentUser();
     if (savedUser) {
       setUser(savedUser);
+      const screen = getAuthScreen(savedUser);
+      setAuthScreen(screen);
+    } else {
+      setAuthScreen('login');
     }
     loadData();
   }, []);
@@ -69,13 +88,46 @@ export default function App() {
     }
   };
 
+  // Called after Supabase register
+  const handleRegistered = (newUser) => {
+    setUser(newUser);
+    setAuthScreen('login');
+  };
+
+  // Called after successful login
+  const handleLoggedIn = (loggedUser) => {
+    setUser(loggedUser);
+    const screen = getAuthScreen(loggedUser);
+    setAuthScreen(screen);
+  };
+
+  // Called after Aadhaar verification
+  const handleVerified = (verifiedUser) => {
+    setUser(verifiedUser);
+    apiService.saveCurrentUser(verifiedUser);
+    // Offer WhatsApp linking if not already linked
+    if (!verifiedUser.whatsapp_number) {
+      setShowWhatsAppModal(true);
+    }
+    setAuthScreen(null);
+  };
+
+  // Called after WhatsApp linking (or skipped)
+  const handleWhatsAppDone = (updatedUser) => {
+    if (updatedUser) {
+      setUser(updatedUser);
+      apiService.saveCurrentUser(updatedUser);
+    }
+    setShowWhatsAppModal(false);
+  };
+
   const handleSupport = async (complaintId) => {
     if (!user) {
-      setIsAuthOpen(true);
+      setAuthScreen('login');
       throw new Error('Please login to support');
     }
-    if (!user.is_verified) {
-      setIsAuthOpen(true);
+    if (!user.is_aadhaar_verified) {
+      setAuthScreen('verify');
       throw new Error('Aadhaar verification required');
     }
     const res = await apiService.supportComplaint(complaintId, user.id);
@@ -91,26 +143,23 @@ export default function App() {
     }
   };
 
-  const handleLogout = () => {
-    apiService.logoutUser();
+  const handleLogout = async () => {
+    await authService.logout();
     setUser(null);
     setActiveTab('home');
+    setAuthScreen('login');
   };
 
   const handleShowDuplicateWarning = (matchedComplaint, pendingPayload) => {
-    setDuplicateModal({
-      isOpen: true,
-      matchedComplaint,
-      pendingPayload
-    });
+    setDuplicateModal({ isOpen: true, matchedComplaint, pendingPayload });
   };
 
   const handleSupportExistingFromDuplicate = async (matchedId) => {
-    if (user && user.is_verified) {
+    if (user && user.is_aadhaar_verified) {
       await apiService.supportComplaint(matchedId, user.id);
       await loadData();
     } else {
-      setIsAuthOpen(true);
+      setAuthScreen(user ? 'verify' : 'login');
     }
   };
 
@@ -124,9 +173,39 @@ export default function App() {
     await loadData();
   };
 
+  // ---- Onboarding Gate ----
+  // Only citizen-facing screens are gated. Admin modal handles its own auth.
+  if (!isAdmin && authScreen === 'register') {
+    return (
+      <RegisterPage
+        onRegistered={handleRegistered}
+        onGoToLogin={() => setAuthScreen('login')}
+      />
+    );
+  }
+
+  if (!isAdmin && authScreen === 'login') {
+    return (
+      <LoginPage
+        onLoggedIn={handleLoggedIn}
+        onGoToRegister={() => setAuthScreen('register')}
+      />
+    );
+  }
+
+  if (!isAdmin && authScreen === 'verify' && user) {
+    return (
+      <IdentityVerificationPage
+        user={user}
+        onVerified={handleVerified}
+      />
+    );
+  }
+
+  // ---- Main Platform ----
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col font-sans text-slate-900">
-      
+
       {/* Header Bar */}
       <Header
         activeTab={activeTab}
@@ -136,14 +215,14 @@ export default function App() {
         }}
         user={user}
         isAdmin={isAdmin}
-        onOpenAuth={() => setIsAuthOpen(true)}
+        onOpenAuth={() => setAuthScreen('login')}
         onToggleAdmin={handleAdminToggle}
         onLogout={handleLogout}
       />
 
       {/* Main View Area */}
       <div className="flex-1 flex">
-        
+
         {/* Admin Interface Layout with Sidebar */}
         {isAdmin ? (
           <div className="flex-1 flex flex-col md:flex-row max-w-7xl w-full mx-auto">
@@ -152,7 +231,7 @@ export default function App() {
               onAdminTabChange={setActiveAdminTab}
               onExitAdmin={() => setIsAdmin(false)}
             />
-            
+
             <main className="flex-1 p-6 md:p-8 bg-slate-50 min-w-0">
               {activeAdminTab === 'dashboard' && (
                 <AdminDashboardView
@@ -189,7 +268,7 @@ export default function App() {
                 onNavigate={setActiveTab}
                 currentUser={user}
                 onSupport={handleSupport}
-                onOpenAuth={() => setIsAuthOpen(true)}
+                onOpenAuth={() => setAuthScreen('login')}
                 onSelectComplaint={(c) => setSelectedComplaint(c)}
               />
             )}
@@ -197,7 +276,7 @@ export default function App() {
             {activeTab === 'report' && (
               <ReportIssuePage
                 currentUser={user}
-                onOpenAuth={() => setIsAuthOpen(true)}
+                onOpenAuth={() => setAuthScreen('login')}
                 onShowDuplicateWarning={handleShowDuplicateWarning}
                 onSubmitSuccess={() => loadData()}
                 onNavigate={setActiveTab}
@@ -209,7 +288,7 @@ export default function App() {
                 complaints={complaints}
                 currentUser={user}
                 onSupport={handleSupport}
-                onOpenAuth={() => setIsAuthOpen(true)}
+                onOpenAuth={() => setAuthScreen('login')}
                 onNavigate={setActiveTab}
                 onSelectComplaint={(c) => setSelectedComplaint(c)}
                 loading={loading}
@@ -228,8 +307,9 @@ export default function App() {
             {activeTab === 'profile' && (
               <ProfilePage
                 currentUser={user}
-                onOpenAuth={() => setIsAuthOpen(true)}
+                onOpenAuth={() => setAuthScreen('login')}
                 onLogout={handleLogout}
+                onInitiateVerification={() => setAuthScreen('verify')}
               />
             )}
           </main>
@@ -239,14 +319,16 @@ export default function App() {
       {/* Official Government Footer */}
       <Footer />
 
-      {/* Modals & Dialogs */}
-      <AuthModal
-        isOpen={isAuthOpen}
-        onClose={() => setIsAuthOpen(false)}
-        existingUser={user}
-        onAuthSuccess={(u) => setUser(u)}
-      />
+      {/* WhatsApp Linking Modal (post-verification) */}
+      {showWhatsAppModal && user && (
+        <WhatsAppLinkModal
+          user={user}
+          onLinked={handleWhatsAppDone}
+          onSkip={() => handleWhatsAppDone(null)}
+        />
+      )}
 
+      {/* Admin Login Modal */}
       <AdminLoginModal
         isOpen={isAdminLoginOpen}
         onClose={() => setIsAdminLoginOpen(false)}
@@ -260,7 +342,7 @@ export default function App() {
           allComplaints={complaints}
           currentUser={user}
           onSupport={handleSupport}
-          onOpenAuth={() => setIsAuthOpen(true)}
+          onOpenAuth={() => setAuthScreen('login')}
           onSelectComplaint={(c) => setSelectedComplaint(c)}
         />
       )}

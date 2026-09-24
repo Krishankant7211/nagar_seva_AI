@@ -90,7 +90,17 @@ def check_duplicate(request: DuplicateCheckRequest, db: Session = Depends(get_db
 def create_complaint(data: ComplaintCreate, db: Session = Depends(get_db)):
     """
     Submits a new civic complaint, runs Gemini AI analysis, and stores the record.
+    Requires Aadhaar identity verification (is_aadhaar_verified = True).
     """
+    # Access control: only Aadhaar-verified citizens can submit complaints
+    if data.citizen_id:
+        user = db.query(User).filter(User.id == data.citizen_id).first()
+        if user and not user.is_aadhaar_verified:
+            raise HTTPException(
+                status_code=403,
+                detail="Access Denied: Complete Aadhaar identity verification before submitting complaints."
+            )
+
     # Run Gemini AI Service Layer
     ai_result = AIService.analyze_complaint(
         image_url=data.image_url,
@@ -132,8 +142,8 @@ def support_complaint(complaint_id: str, req: SupportRequest, db: Session = Depe
     if not user:
         raise HTTPException(status_code=404, detail="User profile not found. Please log in.")
         
-    if not user.is_verified:
-        raise HTTPException(status_code=403, detail="Only verified citizens with valid Aadhaar can support complaints.")
+    if not user.is_aadhaar_verified:
+        raise HTTPException(status_code=403, detail="Access Denied: Complete Aadhaar identity verification before supporting complaints.")
 
     # Check for existing support record
     existing_support = db.query(Support).filter(

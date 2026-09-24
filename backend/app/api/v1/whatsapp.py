@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.user import User
@@ -14,31 +14,47 @@ def whatsapp_webhook(payload: WhatsAppWebhookPayload, db: Session = Depends(get_
     Inbound WhatsApp webhook endpoint.
     Receives photo, description, and location from WhatsApp bot,
     runs AI analysis (Gemini), and creates complaint record automatically.
+    Maps incoming WhatsApp number to verified users only.
     """
-    # 1. Lookup or create citizen user record linked to WhatsApp phone
-    user = db.query(User).filter(User.phone_number == payload.sender_phone).first()
+    # 1. Lookup citizen by whatsapp_number first, then phone_number
+    user = db.query(User).filter(User.whatsapp_number == payload.sender_phone).first()
+    if not user:
+        user = db.query(User).filter(User.phone_number == payload.sender_phone).first()
+
+    # 2. If unknown sender, create a provisional record (unverified)
     if not user:
         user = User(
             phone_number=payload.sender_phone,
-            name="WhatsApp Citizen (" + payload.sender_phone[-4:] + ")",
-            is_verified=True, # WhatsApp phone is pre-verified
+            full_name="WhatsApp Citizen (" + payload.sender_phone[-4:] + ")",
+            is_phone_verified=True,
+            is_aadhaar_verified=False,
             role="citizen"
         )
         db.add(user)
         db.commit()
         db.refresh(user)
 
-    # 2. Analyze incoming media & text with Gemini AI
+    # 3. Access control: only Aadhaar-verified users can submit via WhatsApp
+    if not user.is_aadhaar_verified:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Access Denied: WhatsApp complaint submission requires completed Aadhaar identity verification. "
+                "Please visit the Nagar Seva AI portal to verify your identity first."
+            )
+        )
+
+    # 4. Analyze incoming media & text with Gemini AI
     ai_result = AIService.analyze_complaint(
         image_url=payload.media_url,
         description=payload.description or "",
         category="Other"
     )
 
-    # 3. Create complaint automatically
+    # 5. Create complaint automatically
     complaint = Complaint(
         citizen_id=user.id,
-        citizen_name=user.name,
+        citizen_name=user.full_name or user.phone_number,
         image_url=payload.media_url,
         description=payload.description,
         location=payload.location_string,
